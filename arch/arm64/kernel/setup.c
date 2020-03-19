@@ -23,6 +23,7 @@
 #include <linux/interrupt.h>
 #include <linux/smp.h>
 #include <linux/fs.h>
+#include <linux/clk.h>
 #include <linux/proc_fs.h>
 #include <linux/memblock.h>
 #include <linux/of_fdt.h>
@@ -377,6 +378,36 @@ static inline bool cpu_can_disable(unsigned int cpu)
 	return false;
 }
 
+static unsigned long __init cpu_min_freq(unsigned int cpu)
+{
+	unsigned long min_freq = 0;
+	struct device_node *cpu_node;
+	struct device_node *op_node;
+	struct device_node *np;
+
+	cpu_node = of_get_cpu_node(cpu, NULL);
+	if (!cpu_node)
+		return 0;
+
+	op_node = of_parse_phandle(cpu_node, "operating-points-v2", 0);
+	of_node_put(cpu_node);
+	if (!op_node)
+		return 0;
+
+	for_each_available_child_of_node(op_node, np) {
+		u64 freq;
+
+		if (of_property_read_u64(np, "opp-hz", &freq) < 0)
+			continue;
+
+		if (!min_freq || freq < min_freq)
+			min_freq = freq;
+	}
+	of_node_put(op_node);
+
+	return min_freq;
+}
+
 static int __init topology_init(void)
 {
 	int i;
@@ -388,6 +419,18 @@ static int __init topology_init(void)
 		struct cpu *cpu = &per_cpu(cpu_data.cpu, i);
 		cpu->hotpluggable = cpu_can_disable(i);
 		register_cpu(cpu, i);
+	}
+
+	for_each_possible_cpu(i) {
+		struct device *cpu_dev = get_cpu_device(i);
+		unsigned long cpu_freq = cpu_min_freq(i);
+		if (cpu_dev && cpu_freq) {
+			struct clk *cpu_clk = clk_get(cpu_dev, NULL);
+			if (!PTR_ERR_OR_ZERO(cpu_clk)) {
+				clk_set_rate(cpu_clk, cpu_freq);
+				clk_put(cpu_clk);
+			}
+		}
 	}
 
 	return 0;
