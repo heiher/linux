@@ -48,6 +48,10 @@
 	};
 };
 
+&gmac {
+	rx_delay = <0x16>;
+};
+
 &vcc3v3_sys {
 	vin-supply = <&vcc5v0_core>;
 };
