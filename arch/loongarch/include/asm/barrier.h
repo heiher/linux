@@ -17,7 +17,7 @@
  * Hint 0x700: barrier for "read after read" from the same address
  */
 
-#define DBAR(hint) __asm__ __volatile__("dbar %0 " : : "I"(hint) : "memory")
+#define DBAR(hint) __builtin_loongarch_dbar(hint)
 
 #define crwrw		0b00000
 #define cr_r_		0b00101
