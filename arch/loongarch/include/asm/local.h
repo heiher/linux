@@ -28,70 +28,15 @@ typedef struct {
 /*
  * Same as above, but return the result value
  */
-#ifdef CONFIG_CPU_HAS_AMO
 static inline long local_add_return(long i, local_t *l)
 {
-	unsigned long result;
-
-	__asm__ __volatile__(
-	"   " __AMADD " %1, %2, %0      \n"
-	: "+ZB" (l->a.counter), "=&r" (result)
-	: "r" (i)
-	: "memory");
-	result = result + i;
-
-	return result;
+	return __atomic_add_fetch(&l->a.counter, i, __ATOMIC_RELAXED);
 }
 
 static inline long local_sub_return(long i, local_t *l)
 {
-	unsigned long result;
-
-	__asm__ __volatile__(
-	"   " __AMADD "%1, %2, %0       \n"
-	: "+ZB" (l->a.counter), "=&r" (result)
-	: "r" (-i)
-	: "memory");
-
-	result = result - i;
-
-	return result;
+	return __atomic_sub_fetch(&l->a.counter, i, __ATOMIC_RELAXED);
 }
-#else
-static inline long local_add_return(long i, local_t *l)
-{
-        unsigned long result, temp;
-
-        __asm__ __volatile__(
-        "1:"    __LL    "%1, %2         # local_add_return      \n"
-        __stringify(LONG_ADD) "   %0, %1, %3                    \n"
-                __SC    "%0, %2                                 \n"
-        "       beq     %0, $r0, 1b                             \n"
-        __stringify(LONG_ADD) "   %0, %1, %3                    \n"
-        : "=&r" (result), "=&r" (temp), "=ZC" (l->a.counter)
-        : "r" (i), "ZC" (l->a.counter)
-        : "memory");
-
-        return result;
-}
-
-static inline long local_sub_return(long i, local_t *l)
-{
-        unsigned long result, temp;
-
-        __asm__ __volatile__(
-        "1:"    __LL    "%1, %2         # local_sub_return      \n"
-        __stringify(LONG_SUB) "   %0, %1, %3                    \n"
-                __SC    "%0, %2                                 \n"
-        "       beq     %0, $r0, 1b                             \n"
-	__stringify(LONG_SUB) "   %0, %1, %3                    \n"
-        : "=&r" (result), "=&r" (temp), "=ZC" (l->a.counter)
-        : "r" (i), "ZC" (l->a.counter)
-        : "memory");
-
-        return result;
-}
-#endif
 
 static inline long local_cmpxchg(local_t *l, long old, long new)
 {

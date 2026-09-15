@@ -100,36 +100,21 @@ do {							\
 	WRITE_ONCE(*p, v);				\
 } while (0)
 
+#ifdef CONFIG_CPU_HAS_AMO
 #define __smp_store_mb(p, v)							\
 do {										\
-	union { typeof(p) __val; char __c[1]; } __u =				\
-		{ .__val = (__force typeof(p)) (v) };				\
-	unsigned long __tmp;							\
 	switch (sizeof(p)) {							\
 	case 1:									\
-		*(volatile __u8 *)&p = *(__u8 *)__u.__c;			\
-		__smp_mb();							\
-		break;								\
 	case 2:									\
-		*(volatile __u16 *)&p = *(__u16 *)__u.__c;			\
+		WRITE_ONCE(p, v);						\
 		__smp_mb();							\
 		break;								\
-	case 4:									\
-		__asm__ __volatile__(						\
-		"amswap_db.w %[tmp], %[val], %[mem]	\n"			\
-		: [mem] "+ZB" (*(u32 *)&p), [tmp] "=&r" (__tmp)			\
-		: [val] "r" (*(__u32 *)__u.__c)					\
-		: );								\
-		break;								\
-	case 8:									\
-		__asm__ __volatile__(						\
-		"amswap_db.d %[tmp], %[val], %[mem]	\n"			\
-		: [mem] "+ZB" (*(u64 *)&p), [tmp] "=&r" (__tmp)			\
-		: [val] "r" (*(__u64 *)__u.__c)					\
-		: );								\
+	default:								\
+		__atomic_exchange_n(&p, v, __ATOMIC_SEQ_CST);			\
 		break;								\
 	}									\
 } while (0)
+#endif /* CONFIG_CPU_HAS_AMO */
 
 #include <asm-generic/barrier.h>
 

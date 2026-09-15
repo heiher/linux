@@ -35,42 +35,6 @@ static inline void set_my_cpu_offset(unsigned long off)
 	__my_cpu_offset;				\
 })
 
-#ifdef CONFIG_CPU_HAS_AMO
-
-#define PERCPU_OP(op, asm_op, c_op)					\
-static __always_inline unsigned long __percpu_##op(void *ptr,		\
-			unsigned long val, int size)			\
-{									\
-	unsigned long ret;						\
-									\
-	switch (size) {							\
-	case 4:								\
-		__asm__ __volatile__(					\
-		"am"#asm_op".w"	" %[ret], %[val], %[ptr]	\n"	\
-		: [ret] "=&r" (ret), [ptr] "+ZB"(*(u32 *)ptr)		\
-		: [val] "r" (val));					\
-		break;							\
-	case 8:								\
-		__asm__ __volatile__(					\
-		"am"#asm_op".d" " %[ret], %[val], %[ptr]	\n"	\
-		: [ret] "=&r" (ret), [ptr] "+ZB"(*(u64 *)ptr)		\
-		: [val] "r" (val));					\
-		break;							\
-	default:							\
-		ret = 0;						\
-		BUILD_BUG();						\
-	}								\
-									\
-	return ret c_op val;						\
-}
-
-PERCPU_OP(add, add, +)
-PERCPU_OP(and, and, &)
-PERCPU_OP(or, or, |)
-#undef PERCPU_OP
-
-#endif
-
 #ifdef CONFIG_64BIT
 
 #define __pcpu_op_1(op)		op ".b "
@@ -102,8 +66,6 @@ do {									\
 
 #endif
 
-#define __percpu_xchg __arch_xchg
-
 /* this_cpu_cmpxchg */
 #define _protect_cmpxchg_local(pcp, o, n)			\
 ({								\
@@ -118,8 +80,8 @@ do {									\
 ({								\
 	typeof(pcp) __retval;					\
 	preempt_disable_notrace();				\
-	__retval = (typeof(pcp))operation(raw_cpu_ptr(&(pcp)),	\
-					  (val), sizeof(pcp));	\
+	__retval = operation(raw_cpu_ptr(&(pcp)), val,		\
+			     __ATOMIC_RELAXED);			\
 	preempt_enable_notrace();				\
 	__retval;						\
 })
@@ -127,15 +89,15 @@ do {									\
 #ifdef CONFIG_CPU_HAS_AMO
 
 #define _percpu_add(pcp, val) \
-	_pcp_protect(__percpu_add, pcp, val)
+	_pcp_protect(__atomic_add_fetch, pcp, val)
 
 #define _percpu_add_return(pcp, val) _percpu_add(pcp, val)
 
 #define _percpu_and(pcp, val) \
-	_pcp_protect(__percpu_and, pcp, val)
+	_pcp_protect(__atomic_and_fetch, pcp, val)
 
 #define _percpu_or(pcp, val) \
-	_pcp_protect(__percpu_or, pcp, val)
+	_pcp_protect(__atomic_or_fetch, pcp, val)
 
 #define this_cpu_add_4(pcp, val) _percpu_add(pcp, val)
 #define this_cpu_add_8(pcp, val) _percpu_add(pcp, val)
@@ -166,7 +128,7 @@ do {									\
 #endif
 
 #define _percpu_xchg(pcp, val) ((typeof(pcp)) \
-	_pcp_protect(__percpu_xchg, pcp, (unsigned long)(val)))
+	_pcp_protect(__atomic_exchange_n, pcp, val))
 
 #define this_cpu_xchg_1(pcp, val) _percpu_xchg(pcp, val)
 #define this_cpu_xchg_2(pcp, val) _percpu_xchg(pcp, val)
