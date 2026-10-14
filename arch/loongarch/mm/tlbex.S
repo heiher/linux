@@ -652,18 +652,44 @@ SYM_CODE_START(handle_tlb_refill)
 #if PFN_PTE_SHIFT != PAGE_SHIFT
 #error "PFN_PTE_SHIFT != PAGE_SHIFT"
 #endif
+/*
+ * In the slow path PTEs are rotated right by PFN_PTE_SHIFT: the PFN is at
+ * bit 0, so the expected PTE of the k-th page is the first one plus k, and
+ * the software bits 7 ~ PFN_PTE_SHIFT-1 that may differ inside a block
+ * (_PAGE_PRESENT .. _PAGE_CONT, keep in sync with CONTPTE_IGNORE) are at
+ * the top, CONT_IGN_LO ~ 63. _PAGE_VALID is checked instead of PRESENT.
+ */
+#define CONT_IGN_LO	(64 - PFN_PTE_SHIFT + 7)
+#define CONT_ORDER_LO	(_PAGE_CONT_ORDER_SHIFT - PFN_PTE_SHIFT)
+#define CONT_ORDER_HI	(CONT_ORDER_LO + _PAGE_CONT_ORDER_WIDTH - 1)
+
+	/* Compare the PTE at \off(t0) with t1 + \k, rotated */
+	.macro	cont_check off, k
+	ld.d		t2, t0, \off
+	rotri.d		t2, t2, PFN_PTE_SHIFT
+	.if \k
+	addi.d		t2, t2, -\k
+	.endif
+	xor		t2, t2, t1
+	bstrins.d	t2, zero, 63, CONT_IGN_LO
+	bnez		t2, tlb_refill_cont_fail
+	.endm
+
 	/*
 	 * The even PTE is marked as part of a contiguous block, try to map
 	 * the whole block with one large MTLB entry, see mm/contpte.c.
 	 * TLBRELO0/1 and TLBREHI still hold the base page entry for the
 	 * fallback. This runs in DA mode, the code is copied to the refill
 	 * vector, so all branches must stay inside handle_tlb_refill.
+	 * A huge PMD never gets here, bit 13 of its TLBRELO0 is a PFN bit
+	 * below HPAGE_SHIFT.
 	 */
 tlb_refill_cont:
 	csrwr		t1, REFILL_KS0
 	csrwr		t2, REFILL_KS1
+	csrwr		t3, REFILL_KS2
 
-	/* Walk again, t0 = PTE table */
+	/* Walk again, t0 = PTE pointer, t1 = PTE of the bad address */
 	csrrd		t0, LOONGARCH_CSR_PGD
 	lddir		t0, t0, 3
 #if CONFIG_PGTABLE_LEVELS > 3
@@ -672,119 +698,100 @@ tlb_refill_cont:
 #if CONFIG_PGTABLE_LEVELS > 2
 	lddir		t0, t0, 1
 #endif
-	andi		t1, t0, _PAGE_HUGE
-	bnez		t1, tlb_refill_cont_fail
-
-	/* t0 = PTE pointer, t1 = PTE of the bad address */
 	csrrd		t1, LOONGARCH_CSR_TLBRBADV
 	bstrpick.d	t1, t1, PTRS_PER_PTE_BITS + PAGE_SHIFT - 1, PAGE_SHIFT
 	alsl.d		t0, t1, t0, _PTE_T_LOG2
 	ld.d		t1, t0, 0
 
 	/* t2 = block order, must be in [CONTPTE_MIN_ORDER, CONTPTE_MAX_ORDER] */
-	bstrpick.d	t2, t1, _PAGE_CONT_SHIFT, _PAGE_CONT_SHIFT
-	beqz		t2, tlb_refill_cont_fail
 	bstrpick.d	t2, t1, _PAGE_CONT_ORDER_SHIFT + _PAGE_CONT_ORDER_WIDTH - 1, _PAGE_CONT_ORDER_SHIFT
-	addi.d		t1, t2, -CONTPTE_MIN_ORDER
-	sltui		t1, t1, CONTPTE_MAX_ORDER - CONTPTE_MIN_ORDER + 1
-	beqz		t1, tlb_refill_cont_fail
+	addi.d		t3, t2, -CONTPTE_MIN_ORDER
+	sltui		t3, t3, CONTPTE_MAX_ORDER - CONTPTE_MIN_ORDER + 1
+	beqz		t3, tlb_refill_cont_fail
 
-	/* t0 = first PTE pointer of the block */
-	addi.d		t2, t2, _PTE_T_LOG2
-	srl.d		t0, t0, t2
-	sll.d		t0, t0, t2
-	addi.d		t2, t2, -_PTE_T_LOG2
+	/* t0 = first PTE pointer, t3 = end of the block */
+	addi.d		t3, t2, _PTE_T_LOG2
+	srl.d		t0, t0, t3
+	sll.d		t0, t0, t3
+	ori		t1, zero, 1
+	sll.d		t1, t1, t3
+	add.d		t3, t0, t1
 
 	/*
-	 * t1 = expected PTE, the first one with the block order of the bad
-	 * address, it must be present and valid.
+	 * t1 = expected PTE: the first one, valid, with the block order of
+	 * the bad address, rotated. Its PFN must be aligned to the block.
 	 */
 	ld.d		t1, t0, 0
 	bstrins.d	t1, t2, _PAGE_CONT_ORDER_SHIFT + _PAGE_CONT_ORDER_WIDTH - 1, _PAGE_CONT_ORDER_SHIFT
-	andi		t2, t1, _PAGE_PRESENT | _PAGE_VALID
-	xori		t2, t2, _PAGE_PRESENT | _PAGE_VALID
-	bnez		t2, tlb_refill_cont_fail
-
-	/*
-	 * Every PTE must equal the expected one, except the software bits
-	 * 8 ~ PFN_PTE_SHIFT-1 and the bits 48 ~ 60 (CONTPTE_IGNORE).
-	 */
-1:	ld.d		t2, t0, 0
-	xor		t2, t2, t1
-	bstrins.d	t2, zero, 60, 48
-	bstrins.d	t2, zero, PFN_PTE_SHIFT - 1, 8
-	bnez		t2, tlb_refill_cont_fail
-	lu12i.w		t2, (1 << PFN_PTE_SHIFT) >> 12
-	add.d		t1, t1, t2
-	addi.d		t0, t0, _PTE_T_SIZE
-	/* Loop until t0 is aligned to (_PTE_T_SIZE << order) */
-	bstrpick.d	t2, t1, _PAGE_CONT_ORDER_SHIFT + _PAGE_CONT_ORDER_WIDTH - 1, _PAGE_CONT_ORDER_SHIFT
+	andi		t2, t1, _PAGE_VALID
+	beqz		t2, tlb_refill_cont_fail
+	rotri.d		t1, t1, PFN_PTE_SHIFT
+	bstrpick.d	t2, t1, CONT_ORDER_HI, CONT_ORDER_LO
 	sub.d		t2, zero, t2
-	addi.d		t2, t2, 64 - _PTE_T_LOG2
-	sll.d		t2, t0, t2
-	bnez		t2, 1b
-
-	/* t1 = first PTE + block size now, the PFN must be aligned to it */
-	bstrpick.d	t0, t1, _PAGE_CONT_ORDER_SHIFT + _PAGE_CONT_ORDER_WIDTH - 1, _PAGE_CONT_ORDER_SHIFT
-	bstrpick.d	t2, t1, _PAGE_PFN_END_SHIFT - 1, PFN_PTE_SHIFT
-	sub.d		t0, zero, t0
-	addi.d		t0, t0, 64
-	sll.d		t2, t2, t0
+	sll.d		t2, t1, t2		/* shift by 64 - order */
 	bnez		t2, tlb_refill_cont_fail
 
-	/*
-	 * t0 = PS = PAGE_SHIFT + order - 1, t2 = 1 << PS = half block
-	 * in PTE units (PFN_PTE_SHIFT == PAGE_SHIFT), TLBRELO0 = first
-	 * PTE = t1 - 2 * t2, TLBRELO1 = TLBRELO0 + t2.
-	 */
-	bstrpick.d	t0, t1, _PAGE_CONT_ORDER_SHIFT + _PAGE_CONT_ORDER_WIDTH - 1, _PAGE_CONT_ORDER_SHIFT
-	addi.d		t0, t0, PAGE_SHIFT - 1
-	ori		t2, zero, 1
-	sll.d		t2, t2, t0
-	bstrins.d	t1, zero, 60, 48
-	sub.d		t1, t1, t2
-	sub.d		t1, t1, t2
-	add.d		t2, t1, t2
-	csrwr		t1, LOONGARCH_CSR_TLBRELO0
-	csrwr		t2, LOONGARCH_CSR_TLBRELO1
+	/* Every PTE must equal the expected one, 4 per iteration */
+1:	cont_check	0, 0
+	cont_check	8, 1
+	cont_check	16, 2
+	cont_check	24, 3
+	addi.d		t1, t1, 4
+	addi.d		t0, t0, 4 * _PTE_T_SIZE
+	bne		t0, t3, 1b
 
-	/* TLBREHI = block address | PS */
+	/*
+	 * t2 = order, t3 = 1 << order, t1 = TLBRELO0 = first PTE without the
+	 * order, t3 = TLBRELO1 = TLBRELO0 + half of the block.
+	 */
+	bstrpick.d	t2, t1, CONT_ORDER_HI, CONT_ORDER_LO
+	ori		t3, zero, 1
+	sll.d		t3, t3, t2
+	sub.d		t1, t1, t3
+	rotri.d		t1, t1, 64 - PFN_PTE_SHIFT
+	bstrins.d	t1, zero, 60, 48
+	slli.d		t3, t3, PFN_PTE_SHIFT - 1
+	add.d		t3, t1, t3
+	csrwr		t1, LOONGARCH_CSR_TLBRELO0
+	csrwr		t3, LOONGARCH_CSR_TLBRELO1
+
+	/* t2 = PS + 1, TLBREHI = block address | PS, t3 = block end */
+	addi.d		t2, t2, PAGE_SHIFT
 	csrrd		t1, LOONGARCH_CSR_TLBRBADV
-	addi.d		t2, t0, 1
 	srl.d		t1, t1, t2
 	sll.d		t1, t1, t2
-	or		t2, t1, t0
-	csrwr		t2, LOONGARCH_CSR_TLBREHI
+	addi.d		t3, t2, -1
+	or		t3, t1, t3
+	csrwr		t3, LOONGARCH_CSR_TLBREHI
+	ori		t3, zero, 1
+	sll.d		t3, t3, t2
+	add.d		t3, t1, t3
 
-	/* No other entry may overlap the block, invalidate them */
+	/* No other entry may overlap the block, invalidate them, 2 pairs per iteration */
 	csrrd		t0, LOONGARCH_CSR_ASID
 	andi		t0, t0, CSR_ASID_ASID
-2:	invtlb		INVTLB_ADDR_GFALSE_AND_ASID, t0, t1
 	lu12i.w		t2, (PAGE_SIZE << 1) >> 12
+2:	invtlb		INVTLB_ADDR_GFALSE_AND_ASID, t0, t1
 	add.d		t1, t1, t2
-	csrrd		t2, LOONGARCH_CSR_TLBREHI
-	andi		t2, t2, CSR_TLBREHI_PS
-	sub.d		t2, zero, t2
-	addi.d		t2, t2, 63
-	sll.d		t2, t1, t2
-	bnez		t2, 2b
+	invtlb		INVTLB_ADDR_GFALSE_AND_ASID, t0, t1
+	add.d		t1, t1, t2
+	bne		t1, t3, 2b
 
+	/*
+	 * TLBREHI.PS doesn't need to be restored, LDPTE sets it on each
+	 * refill, like after a huge page.
+	 */
 	tlbfill
-
-	/* Restore the default page size for the next refill */
-	csrrd		t0, LOONGARCH_CSR_TLBREHI
-	ori		t1, zero, PS_DEFAULT_SIZE
-	bstrins.d	t0, t1, CSR_TLBREHI_PS_SHIFT + 5, CSR_TLBREHI_PS_SHIFT
-	csrwr		t0, LOONGARCH_CSR_TLBREHI
-
 	csrrd		t1, REFILL_KS0
 	csrrd		t2, REFILL_KS1
+	csrrd		t3, REFILL_KS2
 	csrrd		t0, LOONGARCH_CSR_TLBRSAVE
 	ertn
 
 tlb_refill_cont_fail:
 	csrrd		t1, REFILL_KS0
 	csrrd		t2, REFILL_KS1
+	csrrd		t3, REFILL_KS2
 	tlbfill
 	csrrd		t0, LOONGARCH_CSR_TLBRSAVE
 	ertn

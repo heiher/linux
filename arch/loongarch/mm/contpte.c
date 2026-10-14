@@ -49,12 +49,13 @@
 static_assert(CONTPTE_MAX_ORDER < (1 << _PAGE_CONT_ORDER_WIDTH));
 
 /*
- * PTE bits that may differ inside a block: the software bits 8 ~ PFN_PTE_SHIFT-1
- * (_PAGE_WRITE, _PAGE_MODIFIED, _PAGE_PROTNONE, _PAGE_SPECIAL, _PAGE_CONT)
- * and the bits 48 ~ 60 above PALEN (_PAGE_CONT_ORDER). The PFN is checked
- * separately. Keep in sync with handle_tlb_refill.
+ * PTE bits that may differ inside a block: the software bits 7 ~ PFN_PTE_SHIFT-1
+ * (_PAGE_PRESENT, _PAGE_WRITE, _PAGE_MODIFIED, _PAGE_PROTNONE, _PAGE_SPECIAL,
+ * _PAGE_CONT), _PAGE_VALID is required instead of _PAGE_PRESENT. All other
+ * bits, including _PAGE_CONT_ORDER, must be equal, the PFN must be the next
+ * one. Keep in sync with handle_tlb_refill.
  */
-#define CONTPTE_IGNORE		(GENMASK(PFN_PTE_SHIFT - 1, 8) | GENMASK(60, 48))
+#define CONTPTE_IGNORE		GENMASK(PFN_PTE_SHIFT - 1, 7)
 
 /* Bitmap of block orders that set_ptes() may mark, 0 disables marking */
 unsigned long contpte_orders __read_mostly;
@@ -128,7 +129,11 @@ static bool contpte_check_block(pte_t *ptep, unsigned int order, unsigned long *
 	unsigned long first = pte_val(ptep_get(ptep));
 	unsigned long i, n = 1UL << order;
 
-	if ((first & (_PAGE_PRESENT | _PAGE_VALID)) != (_PAGE_PRESENT | _PAGE_VALID))
+	/* Expect the order of the faulting PTE, like handle_tlb_refill */
+	first &= ~_PAGE_CONT_ORDER;
+	first |= (unsigned long)order << _PAGE_CONT_ORDER_SHIFT;
+
+	if (!(first & _PAGE_VALID))
 		return false;
 	if (pte_pfn(__pte(first)) & (n - 1))
 		return false;
@@ -140,7 +145,7 @@ static bool contpte_check_block(pte_t *ptep, unsigned int order, unsigned long *
 			return false;
 	}
 
-	*lo = first & ~_PAGE_CONT_MASK;
+	*lo = first & ~_PAGE_CONT_ORDER;
 
 	return true;
 }
