@@ -68,6 +68,12 @@
 #define USER_PTRS_PER_PGD       ((TASK_SIZE64 / PGDIR_SIZE)?(TASK_SIZE64 / PGDIR_SIZE):1)
 #endif
 
+#ifdef CONFIG_LOONGARCH_CONT_PTE
+/* Block orders for contiguous PTEs, a block can't cross a PTE table */
+#define CONTPTE_MIN_ORDER	2
+#define CONTPTE_MAX_ORDER	(PAGE_SHIFT - PTRLOG - 1)
+#endif
+
 #ifndef __ASSEMBLER__
 
 #include <linux/mm_types.h>
@@ -378,6 +384,34 @@ static inline void set_pte(pte_t *ptep, pte_t pteval)
 #endif
 }
 
+#ifdef CONFIG_LOONGARCH_CONT_PTE
+#include <linux/page_table_check.h>
+
+extern unsigned long contpte_orders;
+void contpte_set_ptes(struct mm_struct *mm, unsigned long addr,
+		      pte_t *ptep, pte_t pte, unsigned int nr);
+
+static inline void set_ptes(struct mm_struct *mm, unsigned long addr,
+			    pte_t *ptep, pte_t pte, unsigned int nr)
+{
+	page_table_check_ptes_set(mm, addr, ptep, pte, nr);
+
+	if (nr > 1 && READ_ONCE(contpte_orders)) {
+		contpte_set_ptes(mm, addr, ptep, pte, nr);
+		return;
+	}
+
+	for (;;) {
+		set_pte(ptep, pte);
+		if (--nr == 0)
+			break;
+		ptep++;
+		pte = __pte(pte_val(pte) + (1UL << PFN_PTE_SHIFT));
+	}
+}
+#define set_ptes set_ptes
+#endif
+
 static inline void pte_clear(struct mm_struct *mm, unsigned long addr, pte_t *ptep)
 {
 	pte_t pte = ptep_get(ptep);
@@ -480,10 +514,29 @@ static inline pte_t pte_modify(pte_t pte, pgprot_t newprot)
 extern void __update_tlb(struct vm_area_struct *vma,
 			unsigned long address, pte_t *ptep);
 
+#ifdef CONFIG_LOONGARCH_CONT_PTE
+unsigned int contpte_update_tlb(struct vm_area_struct *vma,
+				unsigned long address, pte_t *ptep);
+#endif
+
 static inline void update_mmu_cache_range(struct vm_fault *vmf,
 		struct vm_area_struct *vma, unsigned long address,
 		pte_t *ptep, unsigned int nr)
 {
+#ifdef CONFIG_LOONGARCH_CONT_PTE
+	while (pte_val(ptep_get(ptep)) & _PAGE_CONT) {
+		/* Returns the number of PTEs covered, 0 if not handled */
+		unsigned int done = contpte_update_tlb(vma, address, ptep);
+
+		if (!done)
+			break;
+		if (done >= nr)
+			return;
+		nr -= done;
+		address += done << PAGE_SHIFT;
+		ptep += done;
+	}
+#endif
 	for (;;) {
 		__update_tlb(vma, address, ptep);
 		if (--nr == 0)

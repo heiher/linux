@@ -65,6 +65,26 @@
 /* We borrow bit 13/23 to store the exclusive marker in swap PTEs. */
 #define _PAGE_SWP_EXCLUSIVE	(_ULCAST_(1) << _PAGE_SWP_EXCLUSIVE_SHIFT)
 
+/*
+ * Contiguous PTE block hint, see arch/loongarch/mm/contpte.c.
+ *
+ * _PAGE_CONT lives in a PPN bit below the page size: it is ignored by the
+ * address translation, but kept by LDPTE in TLBRELO0, so the TLB refill
+ * handler can test it cheaply. _PAGE_CONT_ORDER holds the block order and
+ * lives above PALEN; only the refill slow path reads it, from memory.
+ */
+#ifdef CONFIG_LOONGARCH_CONT_PTE
+#define _PAGE_CONT_SHIFT	13
+#define _PAGE_CONT_ORDER_SHIFT	56 /* 56~59, four bits */
+#define _PAGE_CONT_ORDER_WIDTH	4
+#define _PAGE_CONT		(_ULCAST_(1) << _PAGE_CONT_SHIFT)
+#define _PAGE_CONT_ORDER	(_ULCAST_(0xf) << _PAGE_CONT_ORDER_SHIFT)
+#define _PAGE_CONT_MASK		(_PAGE_CONT | _PAGE_CONT_ORDER)
+#else
+#define _PAGE_CONT		0
+#define _PAGE_CONT_MASK		0
+#endif
+
 /* Used by TLB hardware (placed in EntryLo*) */
 #define _PAGE_VALID		(_ULCAST_(1) << _PAGE_VALID_SHIFT)
 #define _PAGE_DIRTY		(_ULCAST_(1) << _PAGE_DIRTY_SHIFT)
@@ -106,7 +126,8 @@
 #define __READABLE	(_PAGE_VALID)
 #define __WRITEABLE	(_PAGE_DIRTY | _PAGE_WRITE)
 
-#define _PAGE_CHG_MASK	(_PAGE_MODIFIED | _PAGE_SPECIAL | _PFN_MASK | _CACHE_MASK | _PAGE_PLV)
+#define _PAGE_CHG_MASK	(_PAGE_MODIFIED | _PAGE_SPECIAL | _PFN_MASK | _CACHE_MASK | _PAGE_PLV | \
+			 _PAGE_CONT_MASK)
 #define _HPAGE_CHG_MASK	(_PAGE_MODIFIED | _PAGE_SPECIAL | _PFN_MASK | _CACHE_MASK | _PAGE_PLV | _PAGE_HUGE)
 
 #define PAGE_NONE	__pgprot(_PAGE_PROTNONE | _PAGE_NO_READ | \

@@ -52,7 +52,7 @@ typedef struct { unsigned long pgd; } pgd_t;
 typedef struct { unsigned long pgprot; } pgprot_t;
 #define pgprot_val(x)	((x).pgprot)
 #define __pgprot(x)	((pgprot_t) { (x) })
-#define pte_pgprot(x)	__pgprot(pte_val(x) & ~_PFN_MASK)
+#define pte_pgprot(x)	__pgprot(pte_val(x) & ~(_PFN_MASK | _PAGE_CONT_MASK))
 
 #define ptep_buddy(x)	((pte_t *)((unsigned long)(x) ^ sizeof(pte_t)))
 

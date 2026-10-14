@@ -155,6 +155,7 @@ extern void handle_tlb_load(void);
 extern void handle_tlb_store(void);
 extern void handle_tlb_modify(void);
 extern void handle_tlb_refill(void);
+extern char handle_tlb_refill_end[];
 extern void handle_tlb_protect(void);
 extern void handle_tlb_load_ptw(void);
 extern void handle_tlb_store_ptw(void);

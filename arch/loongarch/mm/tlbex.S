@@ -639,8 +639,156 @@ SYM_CODE_START(handle_tlb_refill)
 #endif
 	ldpte		t0, 0
 	ldpte		t0, 1
+#ifdef CONFIG_LOONGARCH_CONT_PTE
+	csrrd		t0, LOONGARCH_CSR_TLBRELO0
+	bstrpick.d	t0, t0, _PAGE_CONT_SHIFT, _PAGE_CONT_SHIFT
+	bnez		t0, tlb_refill_cont
+#endif
 	tlbfill
 	csrrd		t0, LOONGARCH_CSR_TLBRSAVE
 	ertn
+
+#ifdef CONFIG_LOONGARCH_CONT_PTE
+#if PFN_PTE_SHIFT != PAGE_SHIFT
+#error "PFN_PTE_SHIFT != PAGE_SHIFT"
+#endif
+	/*
+	 * The even PTE is marked as part of a contiguous block, try to map
+	 * the whole block with one large MTLB entry, see mm/contpte.c.
+	 * TLBRELO0/1 and TLBREHI still hold the base page entry for the
+	 * fallback. This runs in DA mode, the code is copied to the refill
+	 * vector, so all branches must stay inside handle_tlb_refill.
+	 */
+tlb_refill_cont:
+	csrwr		t1, REFILL_KS0
+	csrwr		t2, REFILL_KS1
+
+	/* Walk again, t0 = PTE table */
+	csrrd		t0, LOONGARCH_CSR_PGD
+	lddir		t0, t0, 3
+#if CONFIG_PGTABLE_LEVELS > 3
+	lddir		t0, t0, 2
+#endif
+#if CONFIG_PGTABLE_LEVELS > 2
+	lddir		t0, t0, 1
+#endif
+	andi		t1, t0, _PAGE_HUGE
+	bnez		t1, tlb_refill_cont_fail
+
+	/* t0 = PTE pointer, t1 = PTE of the bad address */
+	csrrd		t1, LOONGARCH_CSR_TLBRBADV
+	bstrpick.d	t1, t1, PTRS_PER_PTE_BITS + PAGE_SHIFT - 1, PAGE_SHIFT
+	alsl.d		t0, t1, t0, _PTE_T_LOG2
+	ld.d		t1, t0, 0
+
+	/* t2 = block order, must be in [CONTPTE_MIN_ORDER, CONTPTE_MAX_ORDER] */
+	bstrpick.d	t2, t1, _PAGE_CONT_SHIFT, _PAGE_CONT_SHIFT
+	beqz		t2, tlb_refill_cont_fail
+	bstrpick.d	t2, t1, _PAGE_CONT_ORDER_SHIFT + _PAGE_CONT_ORDER_WIDTH - 1, _PAGE_CONT_ORDER_SHIFT
+	addi.d		t1, t2, -CONTPTE_MIN_ORDER
+	sltui		t1, t1, CONTPTE_MAX_ORDER - CONTPTE_MIN_ORDER + 1
+	beqz		t1, tlb_refill_cont_fail
+
+	/* t0 = first PTE pointer of the block */
+	addi.d		t2, t2, _PTE_T_LOG2
+	srl.d		t0, t0, t2
+	sll.d		t0, t0, t2
+	addi.d		t2, t2, -_PTE_T_LOG2
+
+	/*
+	 * t1 = expected PTE, the first one with the block order of the bad
+	 * address, it must be present and valid.
+	 */
+	ld.d		t1, t0, 0
+	bstrins.d	t1, t2, _PAGE_CONT_ORDER_SHIFT + _PAGE_CONT_ORDER_WIDTH - 1, _PAGE_CONT_ORDER_SHIFT
+	andi		t2, t1, _PAGE_PRESENT | _PAGE_VALID
+	xori		t2, t2, _PAGE_PRESENT | _PAGE_VALID
+	bnez		t2, tlb_refill_cont_fail
+
+	/*
+	 * Every PTE must equal the expected one, except the software bits
+	 * 8 ~ PFN_PTE_SHIFT-1 and the bits 48 ~ 60 (CONTPTE_IGNORE).
+	 */
+1:	ld.d		t2, t0, 0
+	xor		t2, t2, t1
+	bstrins.d	t2, zero, 60, 48
+	bstrins.d	t2, zero, PFN_PTE_SHIFT - 1, 8
+	bnez		t2, tlb_refill_cont_fail
+	lu12i.w		t2, (1 << PFN_PTE_SHIFT) >> 12
+	add.d		t1, t1, t2
+	addi.d		t0, t0, _PTE_T_SIZE
+	/* Loop until t0 is aligned to (_PTE_T_SIZE << order) */
+	bstrpick.d	t2, t1, _PAGE_CONT_ORDER_SHIFT + _PAGE_CONT_ORDER_WIDTH - 1, _PAGE_CONT_ORDER_SHIFT
+	sub.d		t2, zero, t2
+	addi.d		t2, t2, 64 - _PTE_T_LOG2
+	sll.d		t2, t0, t2
+	bnez		t2, 1b
+
+	/* t1 = first PTE + block size now, the PFN must be aligned to it */
+	bstrpick.d	t0, t1, _PAGE_CONT_ORDER_SHIFT + _PAGE_CONT_ORDER_WIDTH - 1, _PAGE_CONT_ORDER_SHIFT
+	bstrpick.d	t2, t1, _PAGE_PFN_END_SHIFT - 1, PFN_PTE_SHIFT
+	sub.d		t0, zero, t0
+	addi.d		t0, t0, 64
+	sll.d		t2, t2, t0
+	bnez		t2, tlb_refill_cont_fail
+
+	/*
+	 * t0 = PS = PAGE_SHIFT + order - 1, t2 = 1 << PS = half block
+	 * in PTE units (PFN_PTE_SHIFT == PAGE_SHIFT), TLBRELO0 = first
+	 * PTE = t1 - 2 * t2, TLBRELO1 = TLBRELO0 + t2.
+	 */
+	bstrpick.d	t0, t1, _PAGE_CONT_ORDER_SHIFT + _PAGE_CONT_ORDER_WIDTH - 1, _PAGE_CONT_ORDER_SHIFT
+	addi.d		t0, t0, PAGE_SHIFT - 1
+	ori		t2, zero, 1
+	sll.d		t2, t2, t0
+	bstrins.d	t1, zero, 60, 48
+	sub.d		t1, t1, t2
+	sub.d		t1, t1, t2
+	add.d		t2, t1, t2
+	csrwr		t1, LOONGARCH_CSR_TLBRELO0
+	csrwr		t2, LOONGARCH_CSR_TLBRELO1
+
+	/* TLBREHI = block address | PS */
+	csrrd		t1, LOONGARCH_CSR_TLBRBADV
+	addi.d		t2, t0, 1
+	srl.d		t1, t1, t2
+	sll.d		t1, t1, t2
+	or		t2, t1, t0
+	csrwr		t2, LOONGARCH_CSR_TLBREHI
+
+	/* No other entry may overlap the block, invalidate them */
+	csrrd		t0, LOONGARCH_CSR_ASID
+	andi		t0, t0, CSR_ASID_ASID
+2:	invtlb		INVTLB_ADDR_GFALSE_AND_ASID, t0, t1
+	lu12i.w		t2, (PAGE_SIZE << 1) >> 12
+	add.d		t1, t1, t2
+	csrrd		t2, LOONGARCH_CSR_TLBREHI
+	andi		t2, t2, CSR_TLBREHI_PS
+	sub.d		t2, zero, t2
+	addi.d		t2, t2, 63
+	sll.d		t2, t1, t2
+	bnez		t2, 2b
+
+	tlbfill
+
+	/* Restore the default page size for the next refill */
+	csrrd		t0, LOONGARCH_CSR_TLBREHI
+	ori		t1, zero, PS_DEFAULT_SIZE
+	bstrins.d	t0, t1, CSR_TLBREHI_PS_SHIFT + 5, CSR_TLBREHI_PS_SHIFT
+	csrwr		t0, LOONGARCH_CSR_TLBREHI
+
+	csrrd		t1, REFILL_KS0
+	csrrd		t2, REFILL_KS1
+	csrrd		t0, LOONGARCH_CSR_TLBRSAVE
+	ertn
+
+tlb_refill_cont_fail:
+	csrrd		t1, REFILL_KS0
+	csrrd		t2, REFILL_KS1
+	tlbfill
+	csrrd		t0, LOONGARCH_CSR_TLBRSAVE
+	ertn
+#endif
+SYM_INNER_LABEL(handle_tlb_refill_end, SYM_L_GLOBAL)
 SYM_CODE_END(handle_tlb_refill)
 #endif

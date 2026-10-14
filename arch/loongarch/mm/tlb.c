@@ -277,8 +277,11 @@ static void setup_tlb_handler(int cpu)
 
 	/* The tlb handlers are generated only once */
 	if (cpu == 0) {
-		memcpy((void *)tlbrentry, handle_tlb_refill, 0x80);
-		local_flush_icache_range(tlbrentry, tlbrentry + 0x80);
+		unsigned long size = handle_tlb_refill_end - (char *)handle_tlb_refill;
+
+		BUG_ON(size > VECSIZE);
+		memcpy((void *)tlbrentry, handle_tlb_refill, size);
+		local_flush_icache_range(tlbrentry, tlbrentry + size);
 
 		for (int i = EXCCODE_TLBL; i <= EXCCODE_TLBPE; i++)
 			set_handler(i * VECSIZE, exception_table[i], VECSIZE);

@@ -492,6 +492,15 @@
 #define KVM_TEMP_KS			LOONGARCH_CSR_KS5
 #define KVM_KSAVE_MASK			(1 << 4 | 1 << 5)
 
+/* TLB refill slow path (contiguous PTE) allocated KS6 and KS7 statically */
+#define REFILL_KS0			LOONGARCH_CSR_KS6
+#define REFILL_KS1			LOONGARCH_CSR_KS7
+#ifdef CONFIG_LOONGARCH_CONT_PTE
+#define REFILL_KSAVE_MASK		(1 << 6 | 1 << 7)
+#else
+#define REFILL_KSAVE_MASK		0
+#endif
+
 /* Timer registers */
 #define LOONGARCH_CSR_TMID		0x40	/* Timer ID */
 

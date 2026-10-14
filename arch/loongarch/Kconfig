@@ -581,6 +581,24 @@ config ARCH_FORCE_MAX_ORDER
 	  The page size is not necessarily 4KB.  Keep this in mind
 	  when choosing a value for this option.
 
+config LOONGARCH_CONT_PTE
+	bool "Map contiguous PTE blocks with large TLB entries"
+	depends on 64BIT && !PAGE_SIZE_4KB
+	default y
+	help
+	  Large folios (mTHP, large page cache folios) are mapped with
+	  naturally aligned blocks of physically contiguous PTEs. LoongArch
+	  has no hardware contiguous bit, but the MTLB accepts entries of any
+	  supported page size. With this option, such blocks are marked in
+	  the page tables and the TLB refill handler maps a whole block with
+	  a single large MTLB entry, which reduces TLB misses.
+
+	  The marking is only a hint: the refill handler verifies the block
+	  before using a large entry. It is a no-op on CPUs with a hardware
+	  page table walker.
+
+	  If unsure, say Y.
+
 config ARCH_IOREMAP
 	bool "Enable LoongArch DMW-based ioremap()"
 	help
